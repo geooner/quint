@@ -96,22 +96,22 @@ impl Ord for Value {
             }
             (Value::Tuple(a), Value::Tuple(b)) => a.cmp(b), // Relies on ImmutableVec<Value> being Ord
             (Value::Record(a), Value::Record(b)) => {
-                // Convert to sorted Vec<(QuintName, Value)> and compare
+                // Convert to sorted Vec<(&QuintName, &Value)> and compare
                 let mut a_fields: Vec<_> = a.iter().collect();
                 let mut b_fields: Vec<_> = b.iter().collect();
                 // Sort by key (QuintName needs Ord)
-                a_fields.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
-                b_fields.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
-                a_fields.cmp(&b_fields) // Compares (QuintName, Value) pairs
+                a_fields.sort_by(|field_tuple_a, field_tuple_b| field_tuple_a.0.cmp(field_tuple_b.0));
+                b_fields.sort_by(|field_tuple_a, field_tuple_b| field_tuple_a.0.cmp(field_tuple_b.0));
+                a_fields.cmp(&b_fields) // Compares Vec<(&QuintName, &Value)> lexicographically
             }
             (Value::Map(a), Value::Map(b)) => {
-                 // Convert to sorted Vec<(Value, Value)> by key and compare
+                 // Convert to sorted Vec<(&Value, &Value)> by key and compare
                 let mut a_entries: Vec<_> = a.iter().collect();
                 let mut b_entries: Vec<_> = b.iter().collect();
                 // Sort by key (Value needs Ord)
-                a_entries.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
-                b_entries.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
-                a_entries.cmp(&b_entries)
+                a_entries.sort_by(|entry_tuple_a, entry_tuple_b| entry_tuple_a.0.cmp(entry_tuple_b.0));
+                b_entries.sort_by(|entry_tuple_a, entry_tuple_b| entry_tuple_a.0.cmp(entry_tuple_b.0));
+                a_entries.cmp(&b_entries) // Compares Vec<(&Value, &Value)> lexicographically
             }
             (Value::List(a), Value::List(b)) => a.cmp(b), // Relies on ImmutableVec<Value> being Ord
             (Value::Lambda(_, _), Value::Lambda(_, _)) => {
@@ -173,7 +173,8 @@ impl Hash for Value {
                 // Records are unordered collections of named fields.
                 // To ensure canonical hashing, sort by field name.
                 let mut sorted_fields: Vec<_> = fields.iter().collect();
-                sorted_fields.sort_by_key(|(name, _)| name); // QuintName needs Ord
+                // Clone key to satisfy borrow checker for sort_by_key
+                sorted_fields.sort_by_key(|(name, _)| name.clone()); // QuintName needs Ord & Clone
                 for (name, value) in sorted_fields {
                     name.hash(state);
                     value.hash(state);
@@ -182,7 +183,8 @@ impl Hash for Value {
             Value::Map(map) => {
                 // Maps are unordered. To ensure canonical hashing, sort by key.
                 let mut sorted_entries: Vec<_> = map.iter().collect();
-                sorted_entries.sort_by_key(|(k, _)| k); // Key (Value) needs Ord
+                // Clone key to satisfy borrow checker for sort_by_key
+                sorted_entries.sort_by_key(|(k, _)| k.clone()); // Key (Value) needs Ord & Clone
                 for (key, value) in sorted_entries {
                     key.hash(state);
                     value.hash(state);
