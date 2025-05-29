@@ -26,6 +26,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use std::cmp::Ordering;
 
 /// Quint values that hold sets are immutable, use `GenericHashSet` immutable
 /// structure to hold them
@@ -65,10 +66,97 @@ pub enum Value {
     MapSet(Rc<Value>, Rc<Value>),
 }
 
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let self_discr = core::mem::discriminant(self);
+        let other_discr = core::mem::discriminant(other);
+
+        if self_discr != other_discr {
+            // Compare discriminants by their debug string, since Discriminant does not implement Ord
+            use std::fmt::Write;
+            let mut self_dbg = String::new();
+            let mut other_dbg = String::new();
+            write!(&mut self_dbg, "{:?}", self_discr).unwrap();
+            write!(&mut other_dbg, "{:?}", other_discr).unwrap();
+            return self_dbg.cmp(&other_dbg);
+        }
+
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+            (Value::Str(a), Value::Str(b)) => a.cmp(b),
+            (Value::Set(a), Value::Set(b)) => {
+                // Convert to sorted Vecs and compare lexicographically
+                let mut a_elems: Vec<_> = a.iter().collect();
+                let mut b_elems: Vec<_> = b.iter().collect();
+                // Relies on elements themselves being Ord
+                a_elems.sort();
+                b_elems.sort();
+                a_elems.cmp(&b_elems)
+            }
+            (Value::Tuple(a), Value::Tuple(b)) => a.cmp(b), // Relies on ImmutableVec<Value> being Ord
+            (Value::Record(a), Value::Record(b)) => {
+                // Convert to sorted Vec<(&QuintName, &Value)> and compare
+                let mut a_fields: Vec<_> = a.iter().collect();
+                let mut b_fields: Vec<_> = b.iter().collect();
+                // Sort by key (QuintName needs Ord)
+                a_fields.sort_by(|field_tuple_a, field_tuple_b| field_tuple_a.0.cmp(field_tuple_b.0));
+                b_fields.sort_by(|field_tuple_a, field_tuple_b| field_tuple_a.0.cmp(field_tuple_b.0));
+                a_fields.cmp(&b_fields) // Compares Vec<(&QuintName, &Value)> lexicographically
+            }
+            (Value::Map(a), Value::Map(b)) => {
+                 // Convert to sorted Vec<(&Value, &Value)> by key and compare
+                let mut a_entries: Vec<_> = a.iter().collect();
+                let mut b_entries: Vec<_> = b.iter().collect();
+                // Sort by key (Value needs Ord)
+                a_entries.sort_by(|entry_tuple_a, entry_tuple_b| entry_tuple_a.0.cmp(entry_tuple_b.0));
+                b_entries.sort_by(|entry_tuple_a, entry_tuple_b| entry_tuple_a.0.cmp(entry_tuple_b.0));
+                a_entries.cmp(&b_entries) // Compares Vec<(&Value, &Value)> lexicographically
+            }
+            (Value::List(a), Value::List(b)) => a.cmp(b), // Relies on ImmutableVec<Value> being Ord
+            (Value::Lambda(_, _), Value::Lambda(_, _)) => {
+                // Lambdas are not comparable beyond identity if we were to store pointers.
+                // For owned lambdas, they are fundamentally opaque for ordering.
+                panic!("Cannot compare lambdas for ordering");
+            }
+            (Value::Variant(label_a, value_a), Value::Variant(label_b, value_b)) => {
+                label_a.cmp(label_b).then_with(|| value_a.cmp(value_b))
+            }
+            // For "intermediate" set-like values, compare them by their enumerated form.
+            (Value::Interval(..), Value::Interval(..)) => {
+                // Compare as sets by collecting cloned elements
+                let mut a_elems: Vec<Value> = self.as_set().iter().cloned().collect();
+                let mut b_elems: Vec<Value> = other.as_set().iter().cloned().collect();
+                a_elems.sort();
+                b_elems.sort();
+                a_elems.cmp(&b_elems)
+            }
+            (a,b) if a.is_set() && b.is_set() => {
+                 // Handles comparisons like Interval vs Set, PowerSet vs Set etc.
+                 // Must ensure as_set() produces elements that can be sorted.
+                let mut a_elems: Vec<_> = a.as_set().iter().cloned().collect();
+                let mut b_elems: Vec<_> = b.as_set().iter().cloned().collect();
+                a_elems.sort();
+                b_elems.sort();
+                a_elems.cmp(&b_elems)
+            }
+            // If discriminants were same, but we missed a case, it's an issue.
+            // However, the self_discr.cmp(&other_discr) should handle all variant differences.
+            // This final catch-all is for completeness within the same-discriminant block,
+            // though ideally, all pairs are explicitly handled or fall into the is_set() logic.
+            _ => panic!("Unhandled comparison for Value variants with the same discriminant but not explicitly handled."),
+        }
+    }
+}
+
 impl Hash for Value {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // First, hash the discriminant, as we want hashes of Set(1, 2, 3) and
-        // List(1, 2, 3) to be different.
         let discr = core::mem::discriminant(self);
         discr.hash(state);
 
@@ -77,28 +165,41 @@ impl Hash for Value {
             Value::Bool(b) => b.hash(state),
             Value::Str(s) => s.hash(state),
             Value::Set(set) => {
-                for elem in set {
+                let mut elems: Vec<_> = set.iter().cloned().collect();
+                elems.sort(); // Relies on Ord for Value
+                for elem in elems {
                     elem.hash(state);
                 }
             }
             Value::Tuple(elems) => {
+                // Tuples are ordered, hash elements in order
                 for elem in elems {
                     elem.hash(state);
                 }
             }
             Value::Record(fields) => {
-                for (name, value) in fields {
+                // Records are unordered collections of named fields.
+                // To ensure canonical hashing, sort by field name.
+                let mut sorted_fields: Vec<_> = fields.iter().collect();
+                // Clone key to satisfy borrow checker for sort_by_key
+                sorted_fields.sort_by_key(|(name, _)| name.clone()); // QuintName needs Ord & Clone
+                for (name, value) in sorted_fields {
                     name.hash(state);
                     value.hash(state);
                 }
             }
             Value::Map(map) => {
-                for (key, value) in map {
+                // Maps are unordered. To ensure canonical hashing, sort by key.
+                let mut sorted_entries: Vec<_> = map.iter().collect();
+                // Clone key to satisfy borrow checker for sort_by_key
+                sorted_entries.sort_by_key(|(k, _)| k.clone()); // Key (Value) needs Ord & Clone
+                for (key, value) in sorted_entries {
                     key.hash(state);
                     value.hash(state);
                 }
             }
             Value::List(elems) => {
+                // Lists are ordered, hash elements in order
                 for elem in elems {
                     elem.hash(state);
                 }
@@ -110,21 +211,15 @@ impl Hash for Value {
                 label.hash(state);
                 value.hash(state);
             }
-            Value::Interval(start, end) => {
-                start.hash(state);
-                end.hash(state);
-            }
-            Value::CrossProduct(sets) => {
-                for value in sets {
-                    value.hash(state);
+            // For other set-like types, convert to enumerated set and hash that.
+            // This ensures Value::Interval(1,2) hashes same as Value::Set(1,2)
+            Value::Interval(..) | Value::CrossProduct(..) | Value::PowerSet(..) | Value::MapSet(..) => {
+                let set_cow = self.as_set();
+                let mut elems: Vec<_> = set_cow.iter().cloned().collect();
+                elems.sort(); // Relies on Ord for Value
+                for elem in elems {
+                    elem.hash(state);
                 }
-            }
-            Value::PowerSet(value) => {
-                value.hash(state);
-            }
-            Value::MapSet(a, b) => {
-                a.hash(state);
-                b.hash(state);
             }
         }
     }
