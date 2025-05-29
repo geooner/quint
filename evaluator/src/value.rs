@@ -78,7 +78,13 @@ impl Ord for Value {
         let other_discr = core::mem::discriminant(other);
 
         if self_discr != other_discr {
-            return std::cmp::Ord::cmp(&self_discr, &other_discr); // Fully qualified cmp
+            // Compare discriminants by their debug string, since Discriminant does not implement Ord
+            use std::fmt::Write;
+            let mut self_dbg = String::new();
+            let mut other_dbg = String::new();
+            write!(&mut self_dbg, "{:?}", self_discr).unwrap();
+            write!(&mut other_dbg, "{:?}", other_discr).unwrap();
+            return self_dbg.cmp(&other_dbg);
         }
 
         match (self, other) {
