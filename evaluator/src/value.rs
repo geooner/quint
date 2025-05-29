@@ -78,7 +78,7 @@ impl Ord for Value {
         let other_discr = core::mem::discriminant(other);
 
         if self_discr != other_discr {
-            return self_discr.cmp(&other_discr);
+            return std::cmp::Ord::cmp(&self_discr, &other_discr); // Fully qualified cmp
         }
 
         match (self, other) {
@@ -123,11 +123,13 @@ impl Ord for Value {
                 label_a.cmp(label_b).then_with(|| value_a.cmp(value_b))
             }
             // For "intermediate" set-like values, compare them by their enumerated form.
-            (Value::Interval(s1, e1), Value::Interval(s2, e2)) => {
-                // If one wants to compare intervals directly:
-                // s1.cmp(s2).then_with(|| e1.cmp(e2))
-                // However, to treat them as sets for ordering against other sets:
-                self.as_set().iter().collect::<Vec<_>>().cmp(&other.as_set().iter().collect::<Vec<_>>())
+            (Value::Interval(..), Value::Interval(..)) => {
+                // Compare as sets by collecting cloned elements
+                let mut a_elems: Vec<Value> = self.as_set().iter().cloned().collect();
+                let mut b_elems: Vec<Value> = other.as_set().iter().cloned().collect();
+                a_elems.sort();
+                b_elems.sort();
+                a_elems.cmp(&b_elems)
             }
             (a,b) if a.is_set() && b.is_set() => {
                  // Handles comparisons like Interval vs Set, PowerSet vs Set etc.
